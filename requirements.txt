@@ -1,0 +1,25 @@
+# BGsub — Background Subtraction Suite
+# Requirements for BGsub package
+
+# Core dependencies
+numpy>=1.20.0
+scipy>=1.7.0
+
+# File I/O
+fabio>=0.12.0
+h5py>=3.0.0
+
+# GUI (silx for Qt-based widgets)
+silx>=1.0.0
+pandas>=1.3.0
+
+# Optional: for enhanced mathematical methods
+# scipy.ndimage is included in scipy
+
+# Physical fitting (absorption coefficient calculation)
+xraydb>=4.5.0
+
+# Development dependencies
+# pytest>=7.0.0
+# ruff>=0.1.0
+# mypy>=1.0.0
