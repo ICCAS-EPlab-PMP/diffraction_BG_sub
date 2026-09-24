@@ -54,6 +54,19 @@ from PySide6.QtWidgets import (
     QSplitter,
 )
 
+try:
+    from silx.gui.widgets import FilenameCompleter
+    HAS_FILENAME_COMPLETER = True
+except ImportError:
+    FilenameCompleter = None
+    HAS_FILENAME_COMPLETER = False
+try:
+    from silx.gui.widgets import IntEdit
+    HAS_INT_EDIT = True
+except ImportError:
+    IntEdit = QSpinBox
+    HAS_INT_EDIT = False
+
 from BGsub.core.curve_data import Curve1D, CurveMetadata, ProcessMode
 from BGsub.core.curve_processor import CurveProcessor, CurveProcessorConfig
 from BGsub.core.task_pipeline import (
@@ -216,7 +229,7 @@ class CurveWindow(QMainWindow):
         self._parse_mode_combo.currentIndexChanged.connect(self._refresh_t_mode_context)
         parse_form.addRow("列结构 / Column layout", self._parse_mode_combo)
 
-        self._skip_header_spin = QSpinBox()
+        self._skip_header_spin = IntEdit()
         self._skip_header_spin.setRange(0, 200)
         self._skip_header_spin.setValue(0)
         parse_form.addRow("跳过头部 / Skip header", self._skip_header_spin)
@@ -288,7 +301,7 @@ class CurveWindow(QMainWindow):
         self._memory_friendly = QCheckBox("逐文件流式处理 / Stream per file")
         self._memory_friendly.setChecked(True)
 
-        self._preview_limit = QSpinBox()
+        self._preview_limit = IntEdit()
         self._preview_limit.setRange(1, 1000)
         self._preview_limit.setValue(10)
 
@@ -309,6 +322,8 @@ class CurveWindow(QMainWindow):
 
         out_row = QHBoxLayout()
         self._output_target = QLineEdit()
+        if HAS_FILENAME_COMPLETER:
+            self._output_target.setCompleter(FilenameCompleter(self._output_target))
         browse_out = QPushButton("选择目录")
         browse_out.clicked.connect(self._pick_output_target)
         self._browse_output_btn = browse_out

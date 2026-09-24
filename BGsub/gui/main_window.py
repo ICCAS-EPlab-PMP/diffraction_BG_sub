@@ -22,6 +22,26 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+try:
+    from silx.math.combo import mean_std
+    HAS_MEAN_STD = True
+except ImportError:
+    HAS_MEAN_STD = False
+
+try:
+    from silx.gui.widgets.CollapsibleWidget import CollapsibleWidget
+    HAS_COLLAPSIBLE = True
+except ImportError:
+    CollapsibleWidget = None
+    HAS_COLLAPSIBLE = False
+
+try:
+    from silx.gui.plot.LegendsWidget import LegendsWidget
+    HAS_LEGENDS = True
+except ImportError:
+    LegendsWidget = None
+    HAS_LEGENDS = False
+
 # try:
 from silx.gui import qt
 from silx.gui.plot.StackView import StackViewMainWindow
@@ -198,9 +218,20 @@ def calc_intensity(df: pd.DataFrame, ch: str, method: str) -> Optional[float]:
             return float(np.median(v))
         elif method == "trimmed_mean":
             s = np.sort(v)
-            return float(np.mean(s[1:-1])) if len(s) > 2 else float(np.mean(s))
+            if len(s) > 2:
+                if HAS_MEAN_STD:
+                    m, _ = mean_std(s[1:-1])
+                    return float(m)
+                else:
+                    return float(np.mean(s[1:-1]))
+            else:
+                return float(np.mean(s))
         else:
-            return float(np.mean(v))
+            if HAS_MEAN_STD:
+                mean, std = mean_std(v)
+                return float(mean)
+            else:
+                return float(np.mean(v))
     except Exception:
         return None
 
@@ -1170,6 +1201,195 @@ class AppendReplaceDialog(qt.QDialog):
         return self._result
 
 
+class MatchDetailDialog(qt.QDialog):
+    """
+    Match detail popup dialog.
+    匹配详情弹窗，显示当前阈值、详细统计和完整匹配表格。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("匹配详情 / Match Details")
+        self.setMinimumSize(700, 500)
+        self._layout = qt.QVBoxLayout(self)
+
+        # -- Threshold display / 阈值显示 --
+        thresh_group = qt.QGroupBox("当前阈值 / Current Threshold")
+        thresh_layout = qt.QHBoxLayout(thresh_group)
+        self._thresh_label = qt.QLabel("")
+        self._thresh_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        thresh_layout.addWidget(self._thresh_label)
+        thresh_layout.addStretch()
+        self._layout.addWidget(thresh_group)
+
+        # -- Summary stats / 摘要统计 --
+        stats_group = qt.QGroupBox("匹配统计 / Statistics")
+        stats_layout = qt.QGridLayout(stats_group)
+        self._stat_labels: Dict[str, qt.QLabel] = {}
+        stat_items = [
+            ("total", "总计 / Total", "#ccc"),
+            ("passed", "✓ 匹配 / Passed", "#4c4"),
+            ("below", "⚠ 低于阈值 / Below", "#e07b39"),
+            ("failed", "✗ 未匹配 / Failed", "#f66"),
+            ("avg_score", "平均分数 / Avg Score", "#ccc"),
+        ]
+        for col, (key, title, color) in enumerate(stat_items):
+            header = qt.QLabel(title)
+            header.setStyleSheet(f"color: {color}; font-size: 11px;")
+            header.setAlignment(qt.Qt.AlignCenter)
+            value = qt.QLabel("—")
+            value.setStyleSheet(f"color: {color}; font-size: 18px; font-weight: bold;")
+            value.setAlignment(qt.Qt.AlignCenter)
+            stats_layout.addWidget(header, 0, col)
+            stats_layout.addWidget(value, 1, col)
+            self._stat_labels[key] = value
+        self._layout.addWidget(stats_group)
+
+        # -- Worst case detail / 最差案例详情 --
+        detail_group = qt.QGroupBox("最差案例 / Worst Case Detail")
+        detail_layout = qt.QVBoxLayout(detail_group)
+        self._detail_html = qt.QLabel("")
+        self._detail_html.setWordWrap(True)
+        self._detail_html.setTextFormat(qt.Qt.RichText)
+        self._detail_html.setStyleSheet("font-size: 12px; padding: 6px;")
+        self._detail_html.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        detail_layout.addWidget(self._detail_html)
+        self._layout.addWidget(detail_group)
+
+        # -- Match table / 匹配表格 --
+        table_group = qt.QGroupBox("完整匹配表 / Full Match Table")
+        table_layout = qt.QVBoxLayout(table_group)
+        self._table = qt.QTableWidget()
+        self._table.setColumnCount(6)
+        self._table.setHorizontalHeaderLabels(
+            ["图像文件", "电离室文件", "策略", "分数", "状态相似度", "状态"]
+        )
+        self._table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self._table.setAlternatingRowColors(True)
+        table_layout.addWidget(self._table)
+        self._layout.addWidget(table_group)
+
+        # -- Close button / 关闭按钮 --
+        btn_row = qt.QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = qt.QPushButton("关闭 / Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        self._layout.addLayout(btn_row)
+
+    def update_content(
+        self,
+        threshold: float,
+        stats: "MatchStatistics",
+        match_results: "List[MatchResult]",
+        bg_result: "Optional[MatchResult]",
+    ):
+        """
+        Refresh all dialog content.
+        刷新弹窗全部内容。
+        """
+        self._thresh_label.setText(f"{threshold:.2f}")
+
+        n_total = stats.total
+        n_passed = len(stats.passed)
+        n_below = len(stats.below_threshold)
+        n_failed = len(stats.failed)
+
+        scores = [_match_score(mr) for mr in match_results if mr.success]
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+
+        self._stat_labels["total"].setText(str(n_total))
+        self._stat_labels["passed"].setText(str(n_passed))
+        self._stat_labels["below"].setText(str(n_below))
+        self._stat_labels["failed"].setText(str(n_failed))
+        self._stat_labels["avg_score"].setText(f"{avg_score:.3f}")
+
+        self._detail_html.setText(_build_match_explain_html(stats, threshold))
+
+        # Rebuild table / 重建表格
+        self._table.setRowCount(0)
+        all_rows: list = []
+
+        if bg_result:
+            score = _match_score(bg_result)
+            ion_name = os.path.basename(bg_result.matched_path) if bg_result.matched_path else "—"
+            all_rows.append(
+                (
+                    [bg_result.tiff_name, ion_name, bg_result.strategy or "—",
+                     f"{score:.3f}", f"{(bg_result.state_sim or 0.0):.3f}", "背景"],
+                    score, "bg", bg_result,
+                )
+            )
+
+        for mr in match_results:
+            score = _match_score(mr)
+            status_key = _match_status(mr, threshold)
+            ion_name = os.path.basename(mr.matched_path) if mr.matched_path else "—"
+            if status_key == "failed":
+                status_text = "✗ fail"
+                kind = "failed"
+            elif status_key == "passed":
+                status_text = "✓ passed"
+                kind = "passed"
+            else:
+                status_text = f"⚠ <{threshold:.2f}"
+                kind = "below"
+            all_rows.append(
+                (
+                    [mr.tiff_name, ion_name, mr.strategy or "—",
+                     f"{score:.3f}", f"{(mr.state_sim or 0.0):.3f}", status_text],
+                    score, kind, mr,
+                )
+            )
+
+        # Sort: bg first, then by score ascending / 排序：背景优先，其余按分数升序
+        non_bg = [(r, s, k, mr) for r, s, k, mr in all_rows if k != "bg"]
+        bg_rows = [(r, s, k, mr) for r, s, k, mr in all_rows if k == "bg"]
+        non_bg.sort(key=lambda x: x[1])
+        ordered = bg_rows + non_bg
+
+        lowest_ok = stats.worst_case if stats.worst_case_kind == "lowest_passing" else None
+
+        color_map = {
+            "bg": (qt.QColor(30, 30, 60), qt.QColor(160, 160, 255)),
+            "failed": (qt.QColor(80, 20, 20), qt.QColor(255, 100, 100)),
+            "below": (qt.QColor(60, 50, 20), qt.QColor(255, 180, 80)),
+        }
+
+        for row_idx, (row_data, score, kind, mr) in enumerate(ordered):
+            self._table.insertRow(row_idx)
+            for col, val in enumerate(row_data):
+                item = qt.QTableWidgetItem(val)
+                if kind == "passed":
+                    if lowest_ok is mr:
+                        item.setBackground(qt.QColor(50, 70, 50))
+                        item.setForeground(qt.QColor(255, 200, 80))
+                    elif score >= threshold + 0.10:
+                        item.setBackground(qt.QColor(20, 50, 20))
+                        item.setForeground(qt.QColor(80, 255, 80))
+                    else:
+                        item.setBackground(qt.QColor(60, 50, 15))
+                        item.setForeground(qt.QColor(255, 180, 60))
+                else:
+                    bg_color, fg_color = color_map.get(
+                        kind, (qt.QColor(40, 40, 40), qt.QColor(200, 200, 200))
+                    )
+                    item.setBackground(bg_color)
+                    item.setForeground(fg_color)
+                if len(val) > 30:
+                    item.setToolTip(val)
+                self._table.setItem(row_idx, col, item)
+
+        self._table.resizeColumnsToContents()
+        self._table.setColumnWidth(0, 220)
+        self._table.setColumnWidth(1, 180)
+        self._table.setColumnWidth(2, 130)
+        self._table.setColumnWidth(3, 65)
+        self._table.setColumnWidth(4, 75)
+        self._table.setColumnWidth(5, 90)
+
+
 class TiffTab(qt.QWidget):
     """TIFF/EDF 标签页。"""
 
@@ -1199,6 +1419,7 @@ class TiffTab(qt.QWidget):
         self._match_results: List[MatchResult] = []
         self._bg_match_result: Optional[MatchResult] = None
         self._match_threshold: float = 0.60
+        self._match_detail_dialog: Optional[MatchDetailDialog] = None
         self._worker_thread: Optional[qt.QThread] = None
         self._worker: Optional[BackgroundProcessingWorker] = None
 
@@ -1213,7 +1434,7 @@ class TiffTab(qt.QWidget):
         content = qt.QWidget()
         content_layout = qt.QVBoxLayout(content)
 
-        file_group = qt.QGroupBox("① 文件选择 / File Selection")
+        file_group = qt.QGroupBox()
         file_layout = qt.QVBoxLayout(file_group)
 
         btn_row = qt.QHBoxLayout()
@@ -1252,9 +1473,16 @@ class TiffTab(qt.QWidget):
         bg_row.addStretch()
         file_layout.addLayout(bg_row)
 
-        content_layout.addWidget(file_group)
+        if HAS_COLLAPSIBLE:
+            _cw_file = CollapsibleWidget("① 文件选择 / File Selection")
+            _cw_file.setContentsLayout(file_group.layout())
+            _cw_file.setCollapsed(False)
+            _cw_file._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_file)
+        else:
+            content_layout.addWidget(file_group)
 
-        trans_group = qt.QGroupBox("② 透过率设置 / Transmission Source")
+        trans_group = qt.QGroupBox()
         trans_layout = qt.QVBoxLayout(trans_group)
 
         src_row = qt.QHBoxLayout()
@@ -1308,7 +1536,6 @@ class TiffTab(qt.QWidget):
         self._manual_layout.addWidget(self._per_scroll)
         self._per_scroll.setVisible(False)
 
-        self._manual_layout.addWidget(self._uni_widget)
         trans_layout.addWidget(self._manual_widget)
 
         self._ion_widget = qt.QWidget()
@@ -1386,24 +1613,16 @@ class TiffTab(qt.QWidget):
         thresh_row.addStretch()
         ion_layout.addLayout(thresh_row)
 
-        # === Phase 1: 匹配结果表格 ===
-        self._match_table = qt.QTableWidget()
-        self._match_table.setColumnCount(6)
-        self._match_table.setHorizontalHeaderLabels(
-            ["图像文件", "电离室文件", "策略", "分数", "状态相似度", "状态"]
-        )
-        self._match_table.setMinimumHeight(120)
-        self._match_table.setMaximumHeight(200)
-        self._match_table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
-        self._match_table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
-        self._match_table.setAlternatingRowColors(True)
-        ion_layout.addWidget(self._match_table)
-
-        # === Phase 1: 最低成功匹配说明 + 警告 ===
-        self._match_explain = qt.QLabel("")
-        self._match_explain.setWordWrap(True)
-        self._match_explain.setStyleSheet("color: #e07b39; font-size: 12px; padding: 4px;")
-        ion_layout.addWidget(self._match_explain)
+        # === Phase 1: 紧凑匹配摘要栏 + 详情按钮 ===
+        summary_row = qt.QHBoxLayout()
+        self._match_summary_lbl = qt.QLabel("未匹配")
+        self._match_summary_lbl.setStyleSheet("font-size: 13px; padding: 6px; color: #888;")
+        summary_row.addWidget(self._match_summary_lbl, 1)
+        self._match_detail_btn = qt.QPushButton("详情...")
+        self._match_detail_btn.clicked.connect(self._show_match_detail)
+        self._match_detail_btn.setEnabled(False)
+        summary_row.addWidget(self._match_detail_btn)
+        ion_layout.addLayout(summary_row)
 
         # === 原日志区降级为摘要 ===
         self._ion_scroll = qt.QScrollArea()
@@ -1420,9 +1639,16 @@ class TiffTab(qt.QWidget):
         ion_layout.addWidget(self._ion_scroll)
 
         trans_layout.addWidget(self._ion_widget)
-        content_layout.addWidget(trans_group)
+        if HAS_COLLAPSIBLE:
+            _cw_trans = CollapsibleWidget("② 透过率设置 / Transmission")
+            _cw_trans.setContentsLayout(trans_group.layout())
+            _cw_trans.setCollapsed(False)
+            _cw_trans._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_trans)
+        else:
+            content_layout.addWidget(trans_group)
 
-        run_group = qt.QGroupBox("③ 执行 / Run")
+        run_group = qt.QGroupBox()
         run_layout = qt.QVBoxLayout(run_group)
 
         fmt_row = qt.QHBoxLayout()
@@ -1463,9 +1689,16 @@ class TiffTab(qt.QWidget):
         run_btn_row.addWidget(self._prog_lbl)
         run_btn_row.addStretch()
         run_layout.addLayout(run_btn_row)
-        content_layout.addWidget(run_group)
+        if HAS_COLLAPSIBLE:
+            _cw_run = CollapsibleWidget("③ 执行 / Run")
+            _cw_run.setContentsLayout(run_group.layout())
+            _cw_run.setCollapsed(False)
+            _cw_run._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_run)
+        else:
+            content_layout.addWidget(run_group)
 
-        export_group = qt.QGroupBox("④ 导出 / Export")
+        export_group = qt.QGroupBox()
         export_layout = qt.QVBoxLayout(export_group)
 
         export_btn_row = qt.QHBoxLayout()
@@ -1478,13 +1711,27 @@ class TiffTab(qt.QWidget):
         export_btn_row.addWidget(self._compare_btn)
         export_btn_row.addStretch()
         export_layout.addLayout(export_btn_row)
-        content_layout.addWidget(export_group)
+        if HAS_COLLAPSIBLE:
+            _cw_export = CollapsibleWidget("④ 导出 / Export")
+            _cw_export.setContentsLayout(export_group.layout())
+            _cw_export.setCollapsed(False)
+            _cw_export._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_export)
+        else:
+            content_layout.addWidget(export_group)
 
-        log_group = qt.QGroupBox("日志 / Log")
+        log_group = qt.QGroupBox()
         log_layout = qt.QVBoxLayout(log_group)
         self._log = LogWidget()
         log_layout.addWidget(self._log)
-        content_layout.addWidget(log_group)
+        if HAS_COLLAPSIBLE:
+            _cw_log = CollapsibleWidget("日志 / Log")
+            _cw_log.setContentsLayout(log_group.layout())
+            _cw_log.setCollapsed(False)
+            _cw_log._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_log)
+        else:
+            content_layout.addWidget(log_group)
 
         content_layout.addStretch()
         scroll.setWidget(content)
@@ -1653,8 +1900,8 @@ class TiffTab(qt.QWidget):
         # === Phase 1: 清空匹配结果 ===
         self._match_results.clear()
         self._bg_match_result = None
-        self._match_table.setRowCount(0)
-        self._match_explain.setText("")
+        self._match_summary_lbl.setText("未匹配")
+        self._match_detail_btn.setEnabled(False)
         self._ion_result.setText("")
         self._log.append_log("已清空文件列表", "dim")
         self._main_window.clear_views()
@@ -1970,6 +2217,18 @@ class TiffTab(qt.QWidget):
         if self._match_results or self._bg_match_result:
             self._refresh_match_table()
 
+    def _show_match_detail(self):
+        if self._match_detail_dialog is None:
+            self._match_detail_dialog = MatchDetailDialog(self)
+        thresh = self._match_threshold
+        stats = _collect_match_statistics(self._match_results, thresh, self._trans_dict)
+        self._match_detail_dialog.update_content(
+            thresh, stats, self._match_results, self._bg_match_result
+        )
+        self._match_detail_dialog.show()
+        self._match_detail_dialog.raise_()
+        self._match_detail_dialog.activateWindow()
+
     # === Phase 1: 构建结构化匹配结果（单一数据源） ===
     def _build_match_results(self):
         """
@@ -2069,147 +2328,33 @@ class TiffTab(qt.QWidget):
 
     # === Phase 1: 刷新匹配结果表格 ===
     def _refresh_match_table(self):
-        """
-        根据当前阈值筛选并刷新匹配结果表格。
-
-        排序规则：背景行置顶；样品行按分数升序（最危险排在最前）。
-        超长文件名自动设置 tooltip 显示完整路径。
-
-        状态语义：
-          passed     : 成功匹配 且 score >= threshold（绿色 ✓）
-          below_thresh: 成功匹配 但 score <  threshold（橙色 ⚠）
-          match_fail : 匹配失败（红色 ✗）
-        """
-        self._match_table.setRowCount(0)
+        """更新主窗口摘要栏和弹窗（如已打开）。"""
         thresh = self._match_threshold
         stats = _collect_match_statistics(self._match_results, thresh, self._trans_dict)
 
-        bg_row_data = None
-        passed_rows = []
-        below_thresh_rows = []
-        failed_rows = []
-        lowest_ok_item = stats.worst_case if stats.worst_case_kind == "lowest_passing" else None
+        n_passed = len(stats.passed)
+        n_below = len(stats.below_threshold)
+        n_failed = len(stats.failed)
+        scores = [_match_score(mr) for mr in self._match_results if mr.success]
+        avg_score = sum(scores) / len(scores) if scores else 0.0
 
-        for mr in self._match_results:
-            score = _match_score(mr)
-            status_key = _match_status(mr, thresh)
+        parts = []
+        if n_passed:
+            parts.append(f'<span style="color:#4c4">✓ 匹配 {n_passed}</span>')
+        if n_below:
+            parts.append(f'<span style="color:#e07b39">⚠ 低于阈值 {n_below}</span>')
+        if n_failed:
+            parts.append(f'<span style="color:#f66">✗ 未匹配 {n_failed}</span>')
+        parts.append(f'平均分 {avg_score:.3f}')
 
-            if status_key == "failed":
-                status = "✗ fail"
-                ion_name = os.path.basename(mr.matched_path) if mr.matched_path else "—"
-                row_data = [
-                    mr.tiff_name,
-                    ion_name,
-                    mr.strategy or "—",
-                    f"{score:.3f}",
-                    f"{(mr.state_sim or 0.0):.3f}",
-                    status,
-                ]
-                failed_rows.append((row_data, score, mr))
-            elif status_key == "passed":
-                status = "✓ passed"
-                ion_name = os.path.basename(mr.matched_path) if mr.matched_path else "—"
-                row_data = [
-                    mr.tiff_name,
-                    ion_name,
-                    mr.strategy or "—",
-                    f"{score:.3f}",
-                    f"{(mr.state_sim or 0.0):.3f}",
-                    status,
-                ]
-                passed_rows.append((row_data, score, mr))
-            else:
-                status = f"⚠ <{thresh:.2f}"
-                ion_name = os.path.basename(mr.matched_path) if mr.matched_path else "—"
-                row_data = [
-                    mr.tiff_name,
-                    ion_name,
-                    mr.strategy or "—",
-                    f"{score:.3f}",
-                    f"{(mr.state_sim or 0.0):.3f}",
-                    status,
-                ]
-                below_thresh_rows.append((row_data, score, mr))
+        summary_text = "  │  ".join(parts) if parts else '<span style="color:#888">未匹配</span>'
+        self._match_summary_lbl.setText(summary_text)
+        self._match_detail_btn.setEnabled(True)
 
-        if self._bg_match_result:
-            mr = self._bg_match_result
-            score = _match_score(mr)
-            ion_name = os.path.basename(mr.matched_path) if mr.matched_path else "—"
-            bg_row_data = (
-                [
-                    mr.tiff_name,
-                    ion_name,
-                    mr.strategy or "—",
-                    f"{score:.3f}",
-                    f"{(mr.state_sim or 0.0):.3f}",
-                    "背景",
-                ],
-                score,
-                mr,
+        if self._match_detail_dialog and self._match_detail_dialog.isVisible():
+            self._match_detail_dialog.update_content(
+                thresh, stats, self._match_results, self._bg_match_result
             )
-
-        row_idx = 0
-
-        if bg_row_data:
-            row_data, score, mr = bg_row_data
-            self._match_table.insertRow(row_idx)
-            for col, val in enumerate(row_data):
-                item = qt.QTableWidgetItem(val)
-                item.setBackground(qt.QColor(30, 30, 60))
-                item.setForeground(qt.QColor(160, 160, 255))
-                if len(val) > 30:
-                    item.setToolTip(val)
-                self._match_table.setItem(row_idx, col, item)
-            row_idx += 1
-
-        for row_data, score, mr in sorted(failed_rows, key=lambda x: x[1]):
-            self._match_table.insertRow(row_idx)
-            for col, val in enumerate(row_data):
-                item = qt.QTableWidgetItem(val)
-                item.setBackground(qt.QColor(80, 20, 20))
-                item.setForeground(qt.QColor(255, 100, 100))
-                if len(val) > 30:
-                    item.setToolTip(val)
-                self._match_table.setItem(row_idx, col, item)
-            row_idx += 1
-
-        for row_data, score, mr in sorted(below_thresh_rows, key=lambda x: x[1]):
-            self._match_table.insertRow(row_idx)
-            for col, val in enumerate(row_data):
-                item = qt.QTableWidgetItem(val)
-                item.setBackground(qt.QColor(60, 50, 20))
-                item.setForeground(qt.QColor(255, 180, 80))
-                if len(val) > 30:
-                    item.setToolTip(val)
-                self._match_table.setItem(row_idx, col, item)
-            row_idx += 1
-
-        for row_data, score, mr in sorted(passed_rows, key=lambda x: x[1]):
-            self._match_table.insertRow(row_idx)
-            for col, val in enumerate(row_data):
-                item = qt.QTableWidgetItem(val)
-                if lowest_ok_item is mr:
-                    item.setBackground(qt.QColor(50, 70, 50))
-                    item.setForeground(qt.QColor(255, 200, 80))
-                elif score >= thresh + 0.10:
-                    item.setBackground(qt.QColor(20, 50, 20))
-                    item.setForeground(qt.QColor(80, 255, 80))
-                else:
-                    item.setBackground(qt.QColor(60, 50, 15))
-                    item.setForeground(qt.QColor(255, 180, 60))
-                if len(val) > 30:
-                    item.setToolTip(val)
-                self._match_table.setItem(row_idx, col, item)
-            row_idx += 1
-
-        self._match_table.resizeColumnsToContents()
-        self._match_table.setColumnWidth(0, 260)
-        self._match_table.setColumnWidth(1, 200)
-        self._match_table.setColumnWidth(2, 150)
-        self._match_table.setColumnWidth(3, 70)
-        self._match_table.setColumnWidth(4, 80)
-        self._match_table.setColumnWidth(5, 100)
-        self._match_explain.setText(_build_match_explain_html(stats, thresh))
 
     def _calc_ion(self):
         """
@@ -2840,7 +2985,7 @@ class H5Tab(qt.QWidget):
         content = qt.QWidget()
         content_layout = qt.QVBoxLayout(content)
 
-        file_group = qt.QGroupBox("① 选择 H5 文件")
+        file_group = qt.QGroupBox()
         file_layout = qt.QVBoxLayout(file_group)
 
         sample_row = qt.QHBoxLayout()
@@ -2881,9 +3026,16 @@ class H5Tab(qt.QWidget):
         self._bg_list.installEventFilter(self)
         file_layout.addWidget(self._bg_list)
 
-        content_layout.addWidget(file_group)
+        if HAS_COLLAPSIBLE:
+            _cw_h5_file = CollapsibleWidget("① 选择 H5 文件")
+            _cw_h5_file.setContentsLayout(file_group.layout())
+            _cw_h5_file.setCollapsed(False)
+            _cw_h5_file._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_h5_file)
+        else:
+            content_layout.addWidget(file_group)
 
-        trans_group = qt.QGroupBox("② 透过率设置 / Transmission")
+        trans_group = qt.QGroupBox()
         trans_layout = qt.QVBoxLayout(trans_group)
 
         src_row = qt.QHBoxLayout()
@@ -2897,9 +3049,16 @@ class H5Tab(qt.QWidget):
         src_row.addStretch()
         trans_layout.addLayout(src_row)
 
-        content_layout.addWidget(trans_group)
+        if HAS_COLLAPSIBLE:
+            _cw_h5_trans = CollapsibleWidget("② 透过率设置 / Transmission")
+            _cw_h5_trans.setContentsLayout(trans_group.layout())
+            _cw_h5_trans.setCollapsed(False)
+            _cw_h5_trans._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_h5_trans)
+        else:
+            content_layout.addWidget(trans_group)
 
-        run_group = qt.QGroupBox("③ 执行 / Run")
+        run_group = qt.QGroupBox()
         run_layout = qt.QVBoxLayout(run_group)
         run_row = qt.QHBoxLayout()
         self._run_btn = qt.QPushButton("▶ 开始处理 (H5)")
@@ -2917,9 +3076,16 @@ class H5Tab(qt.QWidget):
         run_row.addWidget(self._h5_st)
         run_row.addStretch()
         run_layout.addLayout(run_row)
-        content_layout.addWidget(run_group)
+        if HAS_COLLAPSIBLE:
+            _cw_h5_run = CollapsibleWidget("③ 执行 / Run")
+            _cw_h5_run.setContentsLayout(run_group.layout())
+            _cw_h5_run.setCollapsed(False)
+            _cw_h5_run._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_h5_run)
+        else:
+            content_layout.addWidget(run_group)
 
-        export_group = qt.QGroupBox("④ 导出 / Export")
+        export_group = qt.QGroupBox()
         export_layout = qt.QVBoxLayout(export_group)
         export_row = qt.QHBoxLayout()
         self._save_btn = qt.QPushButton("💾 保存 H5 结果")
@@ -2931,13 +3097,27 @@ class H5Tab(qt.QWidget):
         export_row.addWidget(self._compare_btn)
         export_row.addStretch()
         export_layout.addLayout(export_row)
-        content_layout.addWidget(export_group)
+        if HAS_COLLAPSIBLE:
+            _cw_h5_export = CollapsibleWidget("④ 导出 / Export")
+            _cw_h5_export.setContentsLayout(export_group.layout())
+            _cw_h5_export.setCollapsed(False)
+            _cw_h5_export._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_h5_export)
+        else:
+            content_layout.addWidget(export_group)
 
-        log_group = qt.QGroupBox("日志 / Log")
+        log_group = qt.QGroupBox()
         log_layout = qt.QVBoxLayout(log_group)
         self._log = LogWidget()
         log_layout.addWidget(self._log)
-        content_layout.addWidget(log_group)
+        if HAS_COLLAPSIBLE:
+            _cw_h5_log = CollapsibleWidget("日志 / Log")
+            _cw_h5_log.setContentsLayout(log_group.layout())
+            _cw_h5_log.setCollapsed(False)
+            _cw_h5_log._toolButton.setStyleSheet("QToolButton { border: none; background: transparent; } QToolButton:checked { border: none; background: transparent; }")
+            content_layout.addWidget(_cw_h5_log)
+        else:
+            content_layout.addWidget(log_group)
 
         content_layout.addStretch()
         scroll.setWidget(content)
@@ -3471,6 +3651,10 @@ class BgSubMainWindow(qt.QMainWindow):
         if hasattr(_cp, "setKeepDataAspectRatio"):
             _cp.setKeepDataAspectRatio(True)
         compare_vlayout.addWidget(self._compare_widget)
+
+        if HAS_LEGENDS:
+            self._compare_legend = LegendsWidget(plotWidget=_cp)
+            compare_vlayout.addWidget(self._compare_legend)
         self._view_stack.addWidget(self._compare_container)
 
         right_layout.addWidget(self._view_stack, 3)
@@ -3587,7 +3771,8 @@ class BgSubMainWindow(qt.QMainWindow):
         dummy_data = np.array([[0, 100]], dtype=np.float64)
         self._cmap_dialog.setData(dummy_data)
         self._cmap_dialog.setDataRange(minimum=0, maximum=100)
-        cmap = Colormap(name="jet", normalization="linear")
+        cmap = Colormap(name="jet")
+        cmap.setAutoscalePercentiles((5, 95))
         self._cmap_dialog.setColormap(cmap)
         self._cmap_dialog.accepted.connect(self._apply_colormap)
 
@@ -3727,11 +3912,16 @@ class BgSubMainWindow(qt.QMainWindow):
         self._action_exit.setShortcut("Ctrl+Q")
         self._action_exit.triggered.connect(self.close)
 
+        self._action_colormap = qt.QAction("调色板设置 / Colormap Settings...", self)
+        self._action_colormap.triggered.connect(self._show_colormap_dialog)
+
     def _create_menu(self):
         menubar = self.menuBar()
         file_menu = menubar.addMenu("文件 / File")
         file_menu.addAction(self._action_open)
         file_menu.addAction(self._action_save)
+        file_menu.addSeparator()
+        file_menu.addAction(self._action_colormap)
         file_menu.addSeparator()
         file_menu.addAction(self._action_exit)
 

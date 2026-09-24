@@ -20,6 +20,12 @@ import os
 from typing import Optional, Tuple, List, Dict, Any
 
 import numpy as np
+
+try:
+    from silx.math.combo import mean_std
+    HAS_MEAN_STD = True
+except ImportError:
+    HAS_MEAN_STD = False
 from scipy import ndimage
 from scipy.ndimage import minimum_filter1d, maximum_filter1d
 

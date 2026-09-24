@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Set
 
+try:
+    from silx.gui.widgets import IntEdit
+except ImportError:
+    from PySide6.QtWidgets import QSpinBox as IntEdit
+
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -63,14 +68,14 @@ class Morph1DPanel(QWidget):
         layout.addRow("背景估计方法", self.bg_method_combo)
 
         # 结构元素半径 / Structuring element radius
-        self.radius_spin = QSpinBox()
+        self.radius_spin = IntEdit()
         self.radius_spin.setRange(1, 5000)
         self.radius_spin.setValue(50)
         self.radius_spin.setToolTip("结构元素的半宽度（数据点数）。值越大背景越平滑。推荐 20~200。")
         layout.addRow("结构元素半径（点数）", self.radius_spin)
 
         # 迭代次数 / Iterations
-        self.iter_spin = QSpinBox()
+        self.iter_spin = IntEdit()
         self.iter_spin.setRange(1, 20)
         self.iter_spin.setValue(1)
         self.iter_spin.setToolTip("重复开运算次数。多次迭代使背景更平滑。推荐 1~3。")
@@ -113,7 +118,7 @@ class Fit1DPanel(QWidget):
         desc.setStyleSheet("color: #666; font-size: 11px; padding: 4px;")
         layout.addRow(desc)
 
-        self.degree_spin = QSpinBox()
+        self.degree_spin = IntEdit()
         self.degree_spin.setRange(1, 20)
         self.degree_spin.setValue(4)
         self.degree_spin.setToolTip(

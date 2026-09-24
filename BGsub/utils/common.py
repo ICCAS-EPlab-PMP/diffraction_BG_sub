@@ -13,6 +13,12 @@ from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+try:
+    from silx.math.combo import mean_std
+    HAS_MEAN_STD = True
+except ImportError:
+    HAS_MEAN_STD = False
 import pandas as pd
 
 
@@ -182,9 +188,17 @@ def calc_ion_intensity(df: pd.DataFrame, channel: str, method: str) -> Optional[
         if method == "trimmed_mean":
             sorted_values = np.sort(values)
             if len(sorted_values) > 2:
-                return float(np.mean(sorted_values[1:-1]))
+                if HAS_MEAN_STD:
+                    m, _ = mean_std(sorted_values[1:-1])
+                    return float(m)
+                else:
+                    return float(np.mean(sorted_values[1:-1]))
             return float(np.mean(sorted_values))
-        return float(np.mean(values))
+        if HAS_MEAN_STD:
+            mean, std = mean_std(values)
+            return float(mean)
+        else:
+            return float(np.mean(values))
     except Exception:
         return None
 
